@@ -4,10 +4,68 @@ from pydantic import BaseModel
 import asyncio
 import os
 from dotenv import load_dotenv, find_dotenv
+import subprocess
+import time
+import urllib.request
+import urllib.error
+import socket
 
 load_dotenv(find_dotenv(), override=False)
 
 set_tracing_disabled(True)
+
+# Ensure Ollama is running locally. If not, start it in the background.
+def _is_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ollama_ready(base_url: str) -> bool:
+    try:
+        with urllib.request.urlopen(base_url + "/api/tags", timeout=1) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def start_ollama_if_needed(host: str = "127.0.0.1", port: int = 11434, wait_seconds: int = 1) -> None:
+    base = f"http://{host}:{port}"
+    # Fast path: already running?
+    if _is_port_open(host, port) and _ollama_ready(base):
+        return
+
+    # Not running: try to start in the background.
+    # Note: `ollama serve` runs in the foreground; we detach it so this script can continue.
+    # stdout/stderr are suppressed; remove `DEVNULL` if you want logs.
+    try:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "Could not start 'ollama serve': the 'ollama' binary was not found in PATH. "
+            "Install Ollama or add it to your PATH."
+        )
+
+    # Wait for the server to become ready
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if _is_port_open(host, port) and _ollama_ready(base):
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError(
+            f"Started 'ollama serve' but it did not become ready on {base} within {wait_seconds}s."
+        )
+
+# Start Ollama if needed before configuring the OpenAI-compatible client
+start_ollama_if_needed()
 
 # Route the SDK to a self-hosted OpenAI-compatible server (e.g., Ollama/LM Studio/vLLM)
 set_default_openai_client(
